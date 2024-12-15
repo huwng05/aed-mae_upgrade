@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable
 from functools import partial
 from itertools import repeat
@@ -66,13 +67,28 @@ class PointwiseConvMlp(nn.Module):
             x = torch.cat((cls_token, x), dim=1)
         return x
 
+
+class DWConv(nn.Module):
+    def __init__(self, dim=768, with_cls_token=True):
+        super(DWConv, self).__init__()
+        self.with_cls_token = with_cls_token
+        self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
+
+    def forward(self, x, H, W):
+        B, N, C = x.shape
+        if self.with_cls_token:
+            cls_token, x = torch.split(x, [1, H*W], 1)
+        x = rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
+        x = self.dwconv(x)
+        x = rearrange(x, 'b c h w -> b (h w) c')
+        if self.with_cls_token:
+            x = torch.cat((cls_token, x), dim=1)
+
+        return x
+
+
 class Mlp(nn.Module):
-    def __init__(self,
-                 in_features,
-                 hidden_features=None,
-                 out_features=None,
-                 act_layer=nn.GELU,
-                 drop=0.):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -80,272 +96,218 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
+        self.apply(self._init_weights)
+        self.with_cls_token = True
 
-    def forward(self, x):
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward(self, x , h, w):
+        if self.with_cls_token:
+            cls_token, x = torch.split(x, [1, h*w], 1)
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
         x = self.drop(x)
+        if self.with_cls_token:
+            x = torch.cat((cls_token, x), dim=1)
         return x
 
 
-class Attention(nn.Module):
-    def __init__(self,
-                 dim_in,
-                 dim_out,
-                 num_heads,
-                 qkv_bias=False,
-                 attn_drop=0.,
-                 proj_drop=0.,
-                 method='dw_bn',
-                 kernel_size=3,
-                 stride_kv=1,
-                 stride_q=1,
-                 padding_kv=1,
-                 padding_q=1,
-                 with_cls_token=True,
-                 **kwargs
-                 ):
+class GPSA(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
+                 locality_strength=1., use_local_init=True, with_cls_token=True):
         super().__init__()
-        self.stride_kv = stride_kv
-        self.stride_q = stride_q
-        self.dim = dim_out
         self.num_heads = num_heads
-        # head_dim = self.qkv_dim // num_heads
-        self.scale = dim_out ** -0.5
-        self.with_cls_token = with_cls_token
+        self.dim = dim
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
 
-        self.conv_proj_q = self._build_projection(
-            dim_in, dim_out, kernel_size, padding_q,
-            stride_q, 'linear' if method == 'avg' else method
-        )
-        self.conv_proj_k = self._build_projection(
-            dim_in, dim_out, kernel_size, padding_kv,
-            stride_kv, method
-        )
-        self.conv_proj_v = self._build_projection(
-            dim_in, dim_out, kernel_size, padding_kv,
-            stride_kv, method
-        )
-
-        self.proj_q = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.proj_k = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.proj_v = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.qk = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)
 
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim_out, dim_out)
+        self.proj = nn.Linear(dim, dim)
+        self.pos_proj = nn.Linear(3, num_heads)
         self.proj_drop = nn.Dropout(proj_drop)
+        self.locality_strength = locality_strength
+        self.gating_param = nn.Parameter(torch.ones(self.num_heads))
+        self.apply(self._init_weights)
+        self.with_cls_token = with_cls_token
+        if use_local_init:
+            self.local_init(locality_strength=locality_strength)
 
-    def _build_projection(self,
-                          dim_in,
-                          dim_out,
-                          kernel_size,
-                          padding,
-                          stride,
-                          method):
-        if method == 'dw_bn':
-            proj = nn.Sequential(OrderedDict([
-                ('conv', nn.Conv2d(
-                    dim_in,
-                    dim_in,
-                    kernel_size=kernel_size,
-                    padding=padding,
-                    stride=stride,
-                    bias=False,
-                    groups=dim_in
-                )),
-                ('bn', nn.BatchNorm2d(dim_in)),
-                ('rearrage', Rearrange('b c h w -> b (h w) c')),
-            ]))
-        elif method == 'avg':
-            proj = nn.Sequential(OrderedDict([
-                ('avg', nn.AvgPool2d(
-                    kernel_size=kernel_size,
-                    padding=padding,
-                    stride=stride,
-                    ceil_mode=True
-                )),
-                ('rearrage', Rearrange('b c h w -> b (h w) c')),
-            ]))
-        elif method == 'linear':
-            proj = None
-        else:
-            raise ValueError('Unknown method ({})'.format(method))
-
-        return proj
-
-    def forward_conv(self, x, h, w):
-        if self.with_cls_token:
-            cls_token, x = torch.split(x, [1, h*w], 1)
-
-        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
-
-        if self.conv_proj_q is not None:
-            q = self.conv_proj_q(x)
-        else:
-            q = rearrange(x, 'b c h w -> b (h w) c')
-
-        if self.conv_proj_k is not None:
-            k = self.conv_proj_k(x)
-        else:
-            k = rearrange(x, 'b c h w -> b (h w) c')
-
-        if self.conv_proj_v is not None:
-            v = self.conv_proj_v(x)
-        else:
-            v = rearrange(x, 'b c h w -> b (h w) c')
-
-        if self.with_cls_token:
-            q = torch.cat((cls_token, q), dim=1)
-            k = torch.cat((cls_token, k), dim=1)
-            v = torch.cat((cls_token, v), dim=1)
-
-        return q, k, v
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, h, w):
-        if (
-            self.conv_proj_q is not None
-            or self.conv_proj_k is not None
-            or self.conv_proj_v is not None
-        ):
-            q, k, v = self.forward_conv(x, h, w)
+        if self.with_cls_token:
+            cls_token, x = torch.split(x, [1, h*w], 1)
+        B, N, C = x.shape
+        if not hasattr(self, 'rel_indices') or self.rel_indices.size(1) != N:
+            self.get_rel_indices(N)
 
-        q = rearrange(self.proj_q(q), 'b t (h d) -> b h t d', h=self.num_heads)
-        k = rearrange(self.proj_k(k), 'b t (h d) -> b h t d', h=self.num_heads)
-        v = rearrange(self.proj_v(v), 'b t (h d) -> b h t d', h=self.num_heads)
-
-        attn_score = torch.einsum('bhlk,bhtk->bhlt', [q, k]) * self.scale
-        attn = F.softmax(attn_score, dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = torch.einsum('bhlt,bhtv->bhlv', [attn, v])
-        x = rearrange(x, 'b h t d -> b t (h d)')
-
+        attn = self.get_attention(x)
+        v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-
+        if self.with_cls_token:
+            x = torch.cat((cls_token, x), dim=1)
         return x
 
-    @staticmethod
-    def compute_macs(module, input, output):
-        # T: num_token
-        # S: num_token
-        input = input[0]
-        flops = 0
+    def get_attention(self, x):
+        B, N, C = x.shape
+        qk = self.qk(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k = qk[0], qk[1]
+        pos_score = self.rel_indices.expand(B, -1, -1, -1)
+        pos_score = self.pos_proj(pos_score).permute(0, 3, 1, 2)
+        patch_score = (q @ k.transpose(-2, -1)) * self.scale
+        patch_score = patch_score.softmax(dim=-1)
+        pos_score = pos_score.softmax(dim=-1)
 
-        _, T, C = input.shape
-        H = W = int(np.sqrt(T-1)) if module.with_cls_token else int(np.sqrt(T))
+        gating = self.gating_param.view(1, -1, 1, 1)
+        attn = (1. - torch.sigmoid(gating)) * patch_score + torch.sigmoid(gating) * pos_score
+        attn /= attn.sum(dim=-1).unsqueeze(-1)
+        attn = self.attn_drop(attn)
+        return attn
 
-        H_Q = H / module.stride_q
-        W_Q = H / module.stride_q
-        T_Q = H_Q * W_Q + 1 if module.with_cls_token else H_Q * W_Q
+    def get_attention_map(self, x, return_map=False):
 
-        H_KV = H / module.stride_kv
-        W_KV = W / module.stride_kv
-        T_KV = H_KV * W_KV + 1 if module.with_cls_token else H_KV * W_KV
+        attn_map = self.get_attention(x).mean(0)  # average over batch
+        distances = self.rel_indices.squeeze()[:, :, -1] ** .5
+        dist = torch.einsum('nm,hnm->h', (distances, attn_map))
+        dist /= distances.size(0)
+        if return_map:
+            return dist, attn_map
+        else:
+            return dist
 
-        # C = module.dim
-        # S = T
-        # Scaled-dot-product macs
-        # [B x T x C] x [B x C x T] --> [B x T x S]
-        # multiplication-addition is counted as 1 because operations can be fused
-        flops += T_Q * T_KV * module.dim
-        # [B x T x S] x [B x S x C] --> [B x T x C]
-        flops += T_Q * module.dim * T_KV
+    def local_init(self, locality_strength=1.):
 
-        if (
-            hasattr(module, 'conv_proj_q')
-            and hasattr(module.conv_proj_q, 'conv')
-        ):
-            params = sum(
-                [
-                    p.numel()
-                    for p in module.conv_proj_q.conv.parameters()
-                ]
-            )
-            flops += params * H_Q * W_Q
+        self.v.weight.data.copy_(torch.eye(self.dim))
+        locality_distance = 1  # max(1,1/locality_strength**.5)
 
-        if (
-            hasattr(module, 'conv_proj_k')
-            and hasattr(module.conv_proj_k, 'conv')
-        ):
-            params = sum(
-                [
-                    p.numel()
-                    for p in module.conv_proj_k.conv.parameters()
-                ]
-            )
-            flops += params * H_KV * W_KV
+        kernel_size = int(self.num_heads ** .5)
+        center = (kernel_size - 1) / 2 if kernel_size % 2 == 0 else kernel_size // 2
+        for h1 in range(kernel_size):
+            for h2 in range(kernel_size):
+                position = h1 + kernel_size * h2
+                self.pos_proj.weight.data[position, 2] = -1
+                self.pos_proj.weight.data[position, 1] = 2 * (h1 - center) * locality_distance
+                self.pos_proj.weight.data[position, 0] = 2 * (h2 - center) * locality_distance
+        self.pos_proj.weight.data *= locality_strength
 
-        if (
-            hasattr(module, 'conv_proj_v')
-            and hasattr(module.conv_proj_v, 'conv')
-        ):
-            params = sum(
-                [
-                    p.numel()
-                    for p in module.conv_proj_v.conv.parameters()
-                ]
-            )
-            flops += params * H_KV * W_KV
+    def get_rel_indices(self, num_patches):
+        img_size = int(num_patches ** .5)
+        rel_indices = torch.zeros(1, num_patches, num_patches, 3)
+        ind = torch.arange(img_size).view(1, -1) - torch.arange(img_size).view(-1, 1)
+        indx = ind.repeat(img_size, img_size)
+        indy = ind.repeat_interleave(img_size, dim=0).repeat_interleave(img_size, dim=1)
+        indd = indx ** 2 + indy ** 2
+        rel_indices[:, :, :, 2] = indd.unsqueeze(0)
+        rel_indices[:, :, :, 1] = indy.unsqueeze(0)
+        rel_indices[:, :, :, 0] = indx.unsqueeze(0)
+        device = self.qk.weight.device
+        self.rel_indices = rel_indices.to(device)
 
-        params = sum([p.numel() for p in module.proj_q.parameters()])
-        flops += params * T_Q
-        params = sum([p.numel() for p in module.proj_k.parameters()])
-        flops += params * T_KV
-        params = sum([p.numel() for p in module.proj_v.parameters()])
-        flops += params * T_KV
-        params = sum([p.numel() for p in module.proj.parameters()])
-        flops += params * T
 
-        module.__flops__ += flops
+class MHSA(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m, h , w):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def get_attention_map(self, x, return_map=False):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn_map = (q @ k.transpose(-2, -1)) * self.scale
+        attn_map = attn_map.softmax(dim=-1).mean(0)
+
+        img_size = int(N ** .5)
+        ind = torch.arange(img_size).view(1, -1) - torch.arange(img_size).view(-1, 1)
+        indx = ind.repeat(img_size, img_size)
+        indy = ind.repeat_interleave(img_size, dim=0).repeat_interleave(img_size, dim=1)
+        indd = indx ** 2 + indy ** 2
+        distances = indd ** .5
+        distances = distances.to('cuda')
+
+        dist = torch.einsum('nm,hnm->h', (distances, attn_map))
+        dist /= N
+
+        if return_map:
+            return dist, attn_map
+        else:
+            return dist
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 
 class Block(nn.Module):
 
-    def __init__(self,
-                 dim_in,
-                 dim_out,
-                 num_heads,
-                 mlp_ratio=4.,
-                 qkv_bias=False,
-                 drop=0.,
-                 attn_drop=0.,
-                 drop_path=0.,
-                 act_layer=nn.GELU,
-                 norm_layer=nn.LayerNorm,
-                 **kwargs):
+    def __init__(self, dim,dim_out, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_gpsa=True, **kwargs):
         super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.use_gpsa = use_gpsa
+        if self.use_gpsa:
+            self.attn = GPSA(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
+                             proj_drop=drop, **kwargs)
+        else:
+            self.attn = MHSA(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
+                             proj_drop=drop, **kwargs)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-        self.norm1 = norm_layer(dim_in)
-        self.attn = Attention(
-            dim_in, dim_out, num_heads, qkv_bias, attn_drop, drop,
-            **kwargs
-        )
-
-        self.drop_path = DropPath(drop_path) \
-            if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim_out)
-
-        dim_mlp_hidden = int(dim_out * mlp_ratio)
-        # self.mlp = Mlp(
-        #     in_features=dim_out,
-        #     hidden_features=dim_mlp_hidden,
-        #     act_layer=act_layer,
-        #     drop=drop
-        # )
-        self.mlp = PointwiseConvMlp(in_features=dim_out, hidden_features=dim_mlp_hidden)
-
-    def forward(self, x, h, w):
-        res = x
-
-        x = self.norm1(x)
-        attn = self.attn(x, h, w)
-        x = res + self.drop_path(attn)
-        x = x + self.drop_path(self.mlp(self.norm2(x), h=h, w=w))
-
+    def forward(self, x,h,w):
+        x = x + self.drop_path(self.attn(self.norm1(x),h=h,w=w))
+        x = x + self.drop_path(self.mlp(self.norm2(x),h=h,w=w))
         return x
+
 
 
 class ConvEmbed(nn.Module):

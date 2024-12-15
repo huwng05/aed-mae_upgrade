@@ -3,7 +3,7 @@ import ml_collections
 
 def get_configs_avenue():
     config = ml_collections.ConfigDict()
-    config.batch_size = 32
+    config.batch_size = 8
     config.epochs = 200
     config.mask_ratio = 0.5
     config.start_TS_epoch = 100
@@ -12,7 +12,7 @@ def get_configs_avenue():
     config.abnormal_score_func = 'L2'
     config.grad_weighted_rec_loss = True
     config.model = "mae_cvt"
-    config.input_size = (320, 640)
+    config.input_size = (640, 640)
     config.norm_pix_loss = False
     config.use_only_masked_tokens_ab = False
     config.run_type = 'train'
