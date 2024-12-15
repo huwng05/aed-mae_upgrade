@@ -127,6 +127,10 @@ def test_one_epoch(model: torch.nn.Module, data_loader: Iterable,
     micro_auc = metrics.auc(fpr, tpr)
     micro_auc = np.nan_to_num(micro_auc, nan=1.0)
 
+    if log_writer is not None:
+        log_writer.add_scalar('test_micro_auc', micro_auc, epoch)
+        log_writer.add_scalar('test_macro_auc', macro_auc, epoch)
+
     # gather the stats from all processes
     print(f"MicroAUC: {micro_auc}, MacroAUC: {macro_auc}")
     return {"micro": micro_auc, "macro": macro_auc}
