@@ -6,7 +6,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import BCELoss
 
-from model.cvt import ConvEmbed, Block
+from model.pvt import ConvEmbed, Block
 from util.morphology import Erosion2d, Dilation2d
 
 
