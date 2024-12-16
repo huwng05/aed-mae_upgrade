@@ -6,7 +6,7 @@ def get_configs_avenue():
     config.batch_size = 8
     config.epochs = 200
     config.mask_ratio = 0.5
-    config.start_TS_epoch = 100
+    config.start_TS_epoch = 78
     config.masking_method = "random_masking"
     config.output_dir = "../experiments/ConViT"  # the checkpoints will be loaded from here
     config.abnormal_score_func = 'L2'
@@ -16,7 +16,7 @@ def get_configs_avenue():
     config.norm_pix_loss = False
     config.use_only_masked_tokens_ab = False
     config.run_type = 'train'
-    config.resume = False
+    config.resume = True
     # Optimizer parameters
     config.weight_decay = 0.05
     config.lr = 1e-4
