@@ -327,7 +327,7 @@ class MaskedAutoencoderCvT(nn.Module):
             target_labels = einops.rearrange(target_labels, 'b p->(b p)', p=num_patches)
             flatten_mask = einops.rearrange(mask, 'b p->(b p)', p=num_patches)
             target_labels = target_labels[flatten_mask == 0]
-            target_labels = einops.rearrange(target_labels, "(b p)-> b p", p=int(num_patches * mask_ratio**2))
+            target_labels = einops.rearrange(target_labels, "(b p)-> b p", p=int(num_patches * (1-mask_ratio)**2))
             target_labels = (target_labels != -1) * 1
             # cls_token = latent[:, -1]
             pred_anomalies = torch.sigmoid(self.cls_anomalies(latent[:, 1:, :]).squeeze())
