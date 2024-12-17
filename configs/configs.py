@@ -3,7 +3,7 @@ import ml_collections
 
 def get_configs_avenue():
     config = ml_collections.ConfigDict()
-    config.batch_size = 8
+    config.batch_size = 16
     config.epochs = 200
     config.mask_ratio = 0.5
     config.start_TS_epoch = 78
@@ -15,7 +15,7 @@ def get_configs_avenue():
     config.input_size = (640, 640)
     config.norm_pix_loss = False
     config.use_only_masked_tokens_ab = False
-    config.run_type = 'train'
+    config.run_type = 'inference'
     config.resume = True
     # Optimizer parameters
     config.weight_decay = 0.05
@@ -51,7 +51,7 @@ def get_configs_shanghai():
     config.input_size = (320, 640)
     config.norm_pix_loss = False
     config.use_only_masked_tokens_ab = False
-    config.run_type = "inference"
+    config.run_type = "train"
     config.resume=False
 
     # Optimizer parameters
