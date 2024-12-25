@@ -87,6 +87,25 @@ class DWConv(nn.Module):
         return x
 
 
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(SEBlock, self).__init__()
+        self.fc1 = nn.Linear(channels, channels // reduction, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(channels // reduction, channels, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        b, n, c = x.size()  # (batch, sequence length, channels)
+
+        x_pool = x[:, 1:, :].mean(dim=1)
+
+        y = self.relu(self.fc1(x_pool))
+
+        y = self.sigmoid(self.fc2(y)).view(b, 1, c)
+
+        return x * y
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
