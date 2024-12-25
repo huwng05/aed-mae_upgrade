@@ -307,7 +307,7 @@ class MHSA(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim,dim_out, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_gpsa=True, **kwargs):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_gpsa=True,reduction=16, **kwargs):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.use_gpsa = use_gpsa
@@ -321,9 +321,10 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.se_block = SEBlock(dim_out, reduction)
 
     def forward(self, x,h,w):
-        x = x + self.drop_path(self.attn(self.norm1(x),h=h,w=w))
+        x = x + self.drop_path(self.attn(self.se_block(self.norm1(x)),h=h,w=w))
         x = x + self.drop_path(self.mlp(self.norm2(x),h=h,w=w))
         return x
 
