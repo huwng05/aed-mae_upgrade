@@ -90,6 +90,27 @@ class Mlp(nn.Module):
         return x
 
 
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(SEBlock, self).__init__()
+        # Giảm số lượng kênh xuống theo tỷ lệ reduction
+        self.fc1 = nn.Linear(channels, channels // reduction, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(channels // reduction, channels, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        b, n, c = x.size()  # (batch, sequence length, channels)
+
+        x_pool = x[:, 1:, :].mean(dim=1)
+
+        # Tầng FC đầu tiên và ReLU
+        y = self.relu(self.fc1(x_pool))
+
+        y = self.sigmoid(self.fc2(y)).view(b, 1, c)
+
+        return x * y
+
 class Attention(nn.Module):
     def __init__(self,
                  dim_in,
@@ -315,6 +336,7 @@ class Block(nn.Module):
                  drop_path=0.,
                  act_layer=nn.GELU,
                  norm_layer=nn.LayerNorm,
+                 reduction = 16,
                  **kwargs):
         super().__init__()
 
@@ -336,11 +358,14 @@ class Block(nn.Module):
         #     drop=drop
         # )
         self.mlp = PointwiseConvMlp(in_features=dim_out, hidden_features=dim_mlp_hidden)
+        self.se_block = SEBlock(dim_out, reduction)
 
     def forward(self, x, h, w):
         res = x
 
         x = self.norm1(x)
+        x = self.se_block(x)
+
         attn = self.attn(x, h, w)
         x = res + self.drop_path(attn)
         x = x + self.drop_path(self.mlp(self.norm2(x), h=h, w=w))
