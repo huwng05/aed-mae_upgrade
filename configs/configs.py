@@ -16,7 +16,7 @@ def get_configs_avenue():
     config.norm_pix_loss = False
     config.use_only_masked_tokens_ab = False
     config.run_type = 'train'
-    config.resume = False
+    config.resume = TrueTrue
     # Optimizer parameters
     config.weight_decay = 0.05
     config.lr = 1e-4
