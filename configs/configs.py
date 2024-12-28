@@ -3,7 +3,7 @@ import ml_collections
 
 def get_configs_avenue():
     config = ml_collections.ConfigDict()
-    config.batch_size = 4
+    config.batch_size = 8
     config.epochs = 200
     config.mask_ratio = 0.5
     config.start_TS_epoch = 78
