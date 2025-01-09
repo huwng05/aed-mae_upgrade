@@ -3,10 +3,10 @@ import ml_collections
 
 def get_configs_avenue():
     config = ml_collections.ConfigDict()
-    config.batch_size = 8
+    config.batch_size = 10
     config.epochs = 200
     config.mask_ratio = 0.5
-    config.start_TS_epoch = 78
+    config.start_TS_epoch = 17
     config.masking_method = "random_masking"
     config.output_dir = "../experiments/ConViT"  # the checkpoints will be loaded from here
     config.abnormal_score_func = 'L2'
