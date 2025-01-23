@@ -8,14 +8,14 @@ def get_configs_avenue():
     config.mask_ratio = 0.5
     config.start_TS_epoch = 100
     config.masking_method = "random_masking"
-    config.output_dir = "../experiments/cvt"  # the checkpoints will be loaded from here
+    config.output_dir = "../experiments/cvt_unet"  # the checkpoints will be loaded from here
     config.abnormal_score_func = 'L2'
     config.grad_weighted_rec_loss = True
     config.model = "mae_cvt"
     config.input_size = (320, 640)
     config.norm_pix_loss = False
     config.use_only_masked_tokens_ab = False
-    config.run_type = 'inference'
+    config.run_type = 'train'
     config.resume = False
     # Optimizer parameters
     config.weight_decay = 0.05

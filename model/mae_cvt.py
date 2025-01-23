@@ -8,6 +8,7 @@ from torch.nn import BCELoss
 
 from model.cvt import ConvEmbed, Block
 from util.morphology import Erosion2d, Dilation2d
+from model.simple_unet import UNet
 
 
 class MaskedAutoencoderCvT(nn.Module):
@@ -48,6 +49,8 @@ class MaskedAutoencoderCvT(nn.Module):
         self.cls_token = nn.Parameter(
             torch.zeros(1, 1, embed_dim)
         )
+
+        self.simple_unet = UNet(embed_dim)
 
         self.blocks = nn.ModuleList([
             Block(embed_dim, embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
@@ -221,6 +224,15 @@ class MaskedAutoencoderCvT(nn.Module):
         for blk in self.blocks:
             x = blk(x, self.masked_H, self.masked_W)
         x = self.norm(x)
+
+        cls_token, x = torch.split(x, [1, self.masked_W * self.masked_H], 1)
+        # print(f"1 - {x_.shape}")
+        x = rearrange(x, 'b (h w) c -> b c h w', h=self.masked_H, w=self.masked_W)
+        # print(f"2 - {x_.shape}")
+        x = self.simple_unet(x)
+        x = rearrange(x, 'b c h w -> b (h w) c')
+        # print(f"3 - {x_.shape}")
+        x = torch.cat((cls_token, x), dim=1)  # append cls token
 
         return x, mask, ids_restore
 
