@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.nn import BCELoss
 
 from model.ConViT import ConvEmbed, Block
+from model.UNetwork import R2AttU_Net
 from util.morphology import Erosion2d, Dilation2d
 
 
@@ -29,7 +30,7 @@ class MaskedAutoencoderCvT(nn.Module):
         self.masking = getattr(self, masking_method)
         self.grad_weighted_loss = grad_weighted_loss
 
-        assert 0 < student_depth < decoder_depth
+        assert 0 < student_depth <= decoder_depth
         self.student_depth = student_depth
         self.train_TS = False
         # --------------------------------------------------------------------------
@@ -66,6 +67,8 @@ class MaskedAutoencoderCvT(nn.Module):
             Block(decoder_embed_dim, decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
                   norm_layer=norm_layer)
             for i in range(decoder_depth)])
+
+        self.UNet = R2AttU_Net(decoder_embed_dim, decoder_embed_dim)
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * out_chans, bias=True)  # decoder to patch
