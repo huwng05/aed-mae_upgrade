@@ -103,6 +103,8 @@ class MaskedAutoencoderCvT(nn.Module):
             param.requires_grad = False
         for param in self.decoder_pred.parameters():
             param.requires_grad = False
+        for param in self.simple_unet.parameters():
+            param.requires_grad = False
         for i in range(0, len(self.decoder_blocks)):
             for param in self.decoder_blocks[i].parameters():
                 param.requires_grad = False
